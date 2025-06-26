@@ -210,8 +210,13 @@ class RedditScraper:
             
             logger.info(f"Downloading media for post {post_id}: {url}")
             
-            # For Reddit videos, we need to get the actual video URL from the post
-            if media_type == 'video' and 'v.redd.it' in url:
+            # Handle GIFs separately - they don't need audio processing
+            if media_type == 'video' and url.lower().endswith('.gif'):
+                logger.info(f"Processing GIF (treating as simple video): {url}")
+                # Skip complex video processing, treat as direct download
+                download_url = url
+            # For Reddit videos (not GIFs), we need to get the actual video URL from the post
+            elif media_type == 'video' and 'v.redd.it' in url:
                 logger.info(f"Processing Reddit video for post {post_id}")
                 video_result = await self._get_reddit_video_url(post_id)
                 if video_result:
@@ -227,16 +232,16 @@ class RedditScraper:
                     else:
                         # It's a URL, use it for standard download
                         logger.info(f"Using Reddit video URL for download: {video_result}")
-                        url = video_result
+                        download_url = video_result
                 else:
                     logger.error(f"Failed to get Reddit video URL for post {post_id}")
                     return None
-            
-            # Handle different URL types
-            download_url = await self._get_download_url(url, media_type)
-            if not download_url:
-                logger.warning(f"Could not get download URL for {url}")
-                return None
+            else:
+                # For all other media types (images, non-Reddit videos), handle URL types normally
+                download_url = await self._get_download_url(url, media_type)
+                if not download_url:
+                    logger.warning(f"Could not get download URL for {url}")
+                    return None
             
             logger.info(f"Downloading from URL: {download_url}")
             
