@@ -16,10 +16,11 @@ logger = logging.getLogger(__name__)
 class RedditScraper:
     """Reddit content scraper."""
     
-    def __init__(self, client_id: str, client_secret: str, user_agent: str, temp_dir: str):
+    def __init__(self, client_id: str, client_secret: str, user_agent: str, temp_dir: str, config=None):
         """Initialize the Reddit scraper."""
         self.temp_dir = Path(temp_dir)
         self.temp_dir.mkdir(parents=True, exist_ok=True)
+        self.config = config  # Store config for timeout and optimization settings
         
         # Initialize Reddit API client
         self.reddit = praw.Reddit(
@@ -468,7 +469,8 @@ class RedditScraper:
             
             # Step 1: Download video stream (REQUIRED)
             logger.info(f"Downloading video stream: {video_url}")
-            video_response = requests.get(video_url, stream=True, timeout=60,  # Increased from 30
+            video_timeout = self.config.video_timeout_seconds if self.config else 60
+            video_response = requests.get(video_url, stream=True, timeout=video_timeout,
                                         headers={
                                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                                             'Accept': '*/*',
@@ -494,7 +496,8 @@ class RedditScraper:
             for audio_url in audio_urls:
                 try:
                     logger.debug(f"Trying audio URL: {audio_url}")
-                    audio_response = requests.get(audio_url, stream=True, timeout=30,  # Increased from 15
+                    audio_timeout = self.config.audio_timeout_seconds if self.config else 30
+                    audio_response = requests.get(audio_url, stream=True, timeout=audio_timeout,
                                                 headers={
                                                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                                                     'Accept': '*/*',
@@ -535,29 +538,46 @@ class RedditScraper:
                     video_input = ffmpeg.input(str(video_temp))
                     audio_input = ffmpeg.input(str(audio_temp))
                     
+                    # Prepare ffmpeg options with Raspberry Pi optimizations
+                    output_options = {
+                        'vcodec': 'copy', 
+                        'acodec': 'copy',  # Try copy first
+                        'map_metadata': 0,  # Copy metadata from first input
+                        'movflags': 'faststart'  # Optimize for streaming
+                    }
+                    
+                    # Add Raspberry Pi specific optimizations
+                    if self.config and self.config.raspberry_pi_mode:
+                        output_options['threads'] = self.config.ffmpeg_threads
+                        logger.debug(f"Using Raspberry Pi mode with {self.config.ffmpeg_threads} threads")
+                    
                     # First try: simple copy (fastest)
                     output = ffmpeg.output(
                         video_input, audio_input, str(output_temp),
-                        vcodec='copy', 
-                        acodec='copy',  # Try copy first
-                        map_metadata=0,  # Copy metadata from first input
-                        movflags='faststart'  # Optimize for streaming
+                        **output_options
                     )
                     
                     # Run ffmpeg with error capture
                     try:
+                        logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg.compile(output))}")
                         ffmpeg.run(output, overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
                     except ffmpeg.Error as e:
                         # If copy fails, try re-encoding audio
-                        logger.warning("Copy mode failed, trying audio re-encoding")
+                        logger.warning(f"Copy mode failed: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+                        logger.warning("Trying audio re-encoding...")
+                        
+                        # Update options for re-encoding
+                        output_options.update({
+                            'acodec': 'aac',  # Re-encode audio to AAC
+                            'audio_bitrate': '128k'
+                        })
+                        
                         output = ffmpeg.output(
                             video_input, audio_input, str(output_temp),
-                            vcodec='copy',
-                            acodec='aac',  # Re-encode audio to AAC
-                            audio_bitrate='128k',
-                            map_metadata=0,
-                            movflags='faststart'
+                            **output_options
                         )
+                        
+                        logger.debug(f"Running FFmpeg re-encode command: {' '.join(ffmpeg.compile(output))}")
                         ffmpeg.run(output, overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
                     
                     # Verify combined output
@@ -576,7 +596,9 @@ class RedditScraper:
                             output_temp.unlink(missing_ok=True)
                         
                 except Exception as ffmpeg_error:
-                    logger.warning(f"ffmpeg combination failed: {ffmpeg_error}")
+                    logger.error(f"ffmpeg combination failed: {ffmpeg_error}")
+                    # Log additional error details if available
+                    logger.error(f"ffmpeg error type: {type(ffmpeg_error).__name__}")
                     if output_temp.exists():
                         output_temp.unlink(missing_ok=True)
             

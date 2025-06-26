@@ -43,6 +43,7 @@ class Config:
         self.raspberry_pi_mode = os.getenv("RASPBERRY_PI_MODE", "false").lower() == "true"
         self.video_timeout_seconds = int(os.getenv("VIDEO_TIMEOUT_SECONDS", "120" if self.raspberry_pi_mode else "60"))
         self.audio_timeout_seconds = int(os.getenv("AUDIO_TIMEOUT_SECONDS", "60" if self.raspberry_pi_mode else "30"))
+        self.ffmpeg_threads = int(os.getenv("FFMPEG_THREADS", "2" if self.raspberry_pi_mode else "4"))
         
         # Ensure directories exist
         self._ensure_directories()

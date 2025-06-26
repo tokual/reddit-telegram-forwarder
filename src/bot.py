@@ -29,7 +29,8 @@ class RedditTelegramBot:
             client_id=config.reddit_client_id or "",
             client_secret=config.reddit_client_secret or "",
             user_agent=config.reddit_user_agent,
-            temp_dir=config.temp_files_dir
+            temp_dir=config.temp_files_dir,
+            config=config
         )
         
         # Initialize Telegram bot application

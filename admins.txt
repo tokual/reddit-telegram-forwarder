@@ -4,4 +4,3 @@
 # 123456789
 # @mychannel
 23682616
-@medpack
