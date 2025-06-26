@@ -39,6 +39,11 @@ class Config:
         self.max_posts_per_check = int(os.getenv("MAX_POSTS_PER_CHECK", "10"))
         self.temp_files_dir = os.getenv("TEMP_FILES_DIR", "./temp")
         
+        # Raspberry Pi optimizations
+        self.raspberry_pi_mode = os.getenv("RASPBERRY_PI_MODE", "false").lower() == "true"
+        self.video_timeout_seconds = int(os.getenv("VIDEO_TIMEOUT_SECONDS", "120" if self.raspberry_pi_mode else "60"))
+        self.audio_timeout_seconds = int(os.getenv("AUDIO_TIMEOUT_SECONDS", "60" if self.raspberry_pi_mode else "30"))
+        
         # Ensure directories exist
         self._ensure_directories()
         

@@ -468,7 +468,7 @@ class RedditScraper:
             
             # Step 1: Download video stream (REQUIRED)
             logger.info(f"Downloading video stream: {video_url}")
-            video_response = requests.get(video_url, stream=True, timeout=30,
+            video_response = requests.get(video_url, stream=True, timeout=60,  # Increased from 30
                                         headers={
                                             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                                             'Accept': '*/*',
@@ -494,7 +494,7 @@ class RedditScraper:
             for audio_url in audio_urls:
                 try:
                     logger.debug(f"Trying audio URL: {audio_url}")
-                    audio_response = requests.get(audio_url, stream=True, timeout=15,
+                    audio_response = requests.get(audio_url, stream=True, timeout=30,  # Increased from 15
                                                 headers={
                                                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
                                                     'Accept': '*/*',
