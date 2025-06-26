@@ -3,12 +3,21 @@
 import asyncio
 import logging
 import os
+import subprocess
+import shutil
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 import requests
 import praw
 from PIL import Image
-import ffmpeg
+
+# Try to import ffmpeg-python, but don't fail if it's not available
+try:
+    import ffmpeg
+    FFMPEG_PYTHON_AVAILABLE = True
+except ImportError:
+    FFMPEG_PYTHON_AVAILABLE = False
+    ffmpeg = None
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +42,11 @@ class RedditScraper:
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
         self.video_extensions = {'.mp4', '.webm', '.mov', '.avi', '.gif'}
         
+        # Find FFmpeg executable
+        self.ffmpeg_path = self._find_ffmpeg_executable()
+        if not self.ffmpeg_path:
+            logger.warning("FFmpeg not found in PATH - video+audio combination will not work")
+    
         logger.info("Reddit scraper initialized")
     
     async def scrape_subreddit(self, subreddit_name: str, sort_type: str = 'hot', 
@@ -531,74 +545,24 @@ class RedditScraper:
             
             # Step 3: Combine video+audio if both available
             if audio_downloaded:
-                try:
-                    logger.info(f"Combining video and audio with ffmpeg (audio from: {audio_url_used})")
+                logger.info(f"Combining video and audio with ffmpeg (audio from: {audio_url_used})")
+                
+                # Use subprocess-based combination to avoid PATH issues
+                combination_success = self._combine_video_audio_subprocess(
+                    str(video_temp), str(audio_temp), str(output_temp)
+                )
+                
+                if combination_success and output_temp.exists() and output_temp.stat().st_size > video_temp.stat().st_size * 0.8:
+                    # Combined file should be at least 80% of video size (reasonable check)
+                    logger.info(f"Video+audio combined successfully: {output_temp.stat().st_size} bytes")
                     
-                    # Use more robust ffmpeg command inspired by yt-dlp
-                    video_input = ffmpeg.input(str(video_temp))
-                    audio_input = ffmpeg.input(str(audio_temp))
+                    # Clean up temporary files
+                    video_temp.unlink(missing_ok=True)
+                    audio_temp.unlink(missing_ok=True)
                     
-                    # Prepare ffmpeg options with Raspberry Pi optimizations
-                    output_options = {
-                        'vcodec': 'copy', 
-                        'acodec': 'copy',  # Try copy first
-                        'map_metadata': 0,  # Copy metadata from first input
-                        'movflags': 'faststart'  # Optimize for streaming
-                    }
-                    
-                    # Add Raspberry Pi specific optimizations
-                    if self.config and self.config.raspberry_pi_mode:
-                        output_options['threads'] = self.config.ffmpeg_threads
-                        logger.debug(f"Using Raspberry Pi mode with {self.config.ffmpeg_threads} threads")
-                    
-                    # First try: simple copy (fastest)
-                    output = ffmpeg.output(
-                        video_input, audio_input, str(output_temp),
-                        **output_options
-                    )
-                    
-                    # Run ffmpeg with error capture
-                    try:
-                        logger.debug(f"Running FFmpeg command: {' '.join(ffmpeg.compile(output))}")
-                        ffmpeg.run(output, overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
-                    except ffmpeg.Error as e:
-                        # If copy fails, try re-encoding audio
-                        logger.warning(f"Copy mode failed: {e.stderr.decode() if e.stderr else 'Unknown error'}")
-                        logger.warning("Trying audio re-encoding...")
-                        
-                        # Update options for re-encoding
-                        output_options.update({
-                            'acodec': 'aac',  # Re-encode audio to AAC
-                            'audio_bitrate': '128k'
-                        })
-                        
-                        output = ffmpeg.output(
-                            video_input, audio_input, str(output_temp),
-                            **output_options
-                        )
-                        
-                        logger.debug(f"Running FFmpeg re-encode command: {' '.join(ffmpeg.compile(output))}")
-                        ffmpeg.run(output, overwrite_output=True, quiet=True, capture_stdout=True, capture_stderr=True)
-                    
-                    # Verify combined output
-                    if output_temp.exists() and output_temp.stat().st_size > video_temp.stat().st_size * 0.8:
-                        # Combined file should be at least 80% of video size (reasonable check)
-                        logger.info(f"Video+audio combined successfully: {output_temp.stat().st_size} bytes")
-                        
-                        # Clean up temporary files
-                        video_temp.unlink(missing_ok=True)
-                        audio_temp.unlink(missing_ok=True)
-                        
-                        return str(output_temp)
-                    else:
-                        logger.warning("ffmpeg output is too small or empty, falling back to video-only")
-                        if output_temp.exists():
-                            output_temp.unlink(missing_ok=True)
-                        
-                except Exception as ffmpeg_error:
-                    logger.error(f"ffmpeg combination failed: {ffmpeg_error}")
-                    # Log additional error details if available
-                    logger.error(f"ffmpeg error type: {type(ffmpeg_error).__name__}")
+                    return str(output_temp)
+                else:
+                    logger.warning("ffmpeg combination failed or output too small, falling back to video-only")
                     if output_temp.exists():
                         output_temp.unlink(missing_ok=True)
             
@@ -643,6 +607,63 @@ class RedditScraper:
                 except:
                     pass
     
+    def _combine_video_audio_subprocess(self, video_path: str, audio_path: str, output_path: str) -> bool:
+        """Combine video and audio using subprocess for better PATH control."""
+        if not self.ffmpeg_path:
+            logger.error("FFmpeg executable not found - cannot combine video and audio")
+            return False
+        
+        # Get timeout from config or use default
+        timeout = getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120
+        
+        try:
+            # Build FFmpeg command
+            cmd = [
+                self.ffmpeg_path,
+                '-i', video_path,
+                '-i', audio_path,
+                '-c:v', 'copy',  # Copy video stream
+                '-c:a', 'aac',   # Re-encode audio to AAC
+                '-shortest',     # Match shortest stream
+                '-avoid_negative_ts', 'make_zero',
+                '-y',            # Overwrite output
+                output_path
+            ]
+            
+            # Add Raspberry Pi optimizations if enabled
+            if self.config and getattr(self.config, 'raspberry_pi_mode', False):
+                # Insert optimization flags before output path
+                optimization_flags = ['-threads', '2', '-preset', 'ultrafast']
+                cmd = cmd[:-1] + optimization_flags + cmd[-1:]
+            
+            logger.debug(f"Running FFmpeg command: {' '.join(cmd)}")
+            
+            # Run FFmpeg
+            result = subprocess.run(
+                cmd,
+                capture_output=True,
+                text=True,
+                timeout=timeout
+            )
+            
+            if result.returncode == 0:
+                logger.debug("FFmpeg combination successful")
+                return True
+            else:
+                logger.error(f"FFmpeg failed with return code {result.returncode}")
+                logger.error(f"FFmpeg stderr: {result.stderr}")
+                return False
+                
+        except subprocess.TimeoutExpired:
+            logger.error(f"FFmpeg combination timed out after {timeout} seconds")
+            return False
+        except FileNotFoundError:
+            logger.error(f"FFmpeg executable not found at: {self.ffmpeg_path}")
+            return False
+        except Exception as e:
+            logger.error(f"FFmpeg combination failed: {e}")
+            return False
+    
     def cleanup_temp_files(self, max_age_hours: int = 24):
         """Clean up old temporary files."""
         try:
@@ -659,3 +680,26 @@ class RedditScraper:
                         
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
+    
+    def _find_ffmpeg_executable(self) -> Optional[str]:
+        """Find the FFmpeg executable in the system."""
+        # First try config if available
+        if self.config and hasattr(self.config, 'ffmpeg_path'):
+            config_path = getattr(self.config, 'ffmpeg_path', None)
+            if config_path and shutil.which(config_path):
+                return config_path
+        
+        # Try common locations
+        possible_paths = [
+            'ffmpeg',  # In PATH
+            '/usr/bin/ffmpeg',  # Common Linux location
+            '/usr/local/bin/ffmpeg',  # Common macOS/Linux location
+            '/opt/homebrew/bin/ffmpeg',  # Apple Silicon macOS
+        ]
+        
+        for path in possible_paths:
+            if shutil.which(path):
+                logger.info(f"Found FFmpeg at: {path}")
+                return path
+        
+        return None

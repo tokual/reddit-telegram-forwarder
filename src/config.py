@@ -45,6 +45,10 @@ class Config:
         self.audio_timeout_seconds = int(os.getenv("AUDIO_TIMEOUT_SECONDS", "60" if self.raspberry_pi_mode else "30"))
         self.ffmpeg_threads = int(os.getenv("FFMPEG_THREADS", "2" if self.raspberry_pi_mode else "4"))
         
+        # FFmpeg configuration - use absolute path for virtual environment compatibility
+        self.ffmpeg_path = os.getenv("FFMPEG_PATH", "/usr/bin/ffmpeg")
+        self.ffmpeg_timeout = int(os.getenv("FFMPEG_TIMEOUT", "120" if self.raspberry_pi_mode else "60"))
+        
         # Ensure directories exist
         self._ensure_directories()
         
