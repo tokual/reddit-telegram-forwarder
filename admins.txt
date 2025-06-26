@@ -1,0 +1,7 @@
+# List of admin Telegram user IDs (one per line)
+# Format: user_id or @channel_username
+# Example:
+# 123456789
+# @mychannel
+23682616
+@medpack
