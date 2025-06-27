@@ -152,7 +152,17 @@ class RedditScraper:
     
     def _get_media_type(self, post) -> str:
         """Determine the media type of a post."""
-        # Check for video indicators first
+        from urllib.parse import urlparse
+        path = urlparse(post.url).path.lower()
+        url_lower = post.url.lower()
+        
+        # Check for GIFs first - treat them specially
+        if path.endswith('.gif'):
+            return 'gif'  # Special type for GIFs
+        elif path.endswith('.gifv'):
+            return 'gifv'  # Special type for GIFV (will be converted to video)
+        
+        # Check for video indicators
         if hasattr(post, 'is_video') and post.is_video:
             return 'video'
         
@@ -160,21 +170,13 @@ class RedditScraper:
         if hasattr(post, 'media') and post.media and 'reddit_video' in str(post.media):
             return 'video'
         
-        # Check URL extension for video files (including GIFs)
-        from urllib.parse import urlparse
-        path = urlparse(post.url).path.lower()
-        
-        # GIFs should be treated as videos for Telegram
-        if path.endswith('.gif'):
-            return 'video'
-        
+        # Check URL extension for video files
         if any(path.endswith(ext) for ext in self.video_extensions):
             return 'video'
         elif any(path.endswith(ext) for ext in self.image_extensions):
             return 'image'
         
         # Check URL for video hosting sites
-        url_lower = post.url.lower()
         if 'v.redd.it' in url_lower:
             return 'video'
         elif 'gfycat.com' in url_lower:
@@ -210,12 +212,23 @@ class RedditScraper:
             
             logger.info(f"Downloading media for post {post_id}: {url}")
             
-            # Handle GIFs separately - they don't need audio processing
-            if media_type == 'video' and url.lower().endswith('.gif'):
-                logger.info(f"Processing GIF (treating as simple video): {url}")
-                # Skip complex video processing, treat as direct download
-                download_url = url
-            # For Reddit videos (not GIFs), we need to get the actual video URL from the post
+            # Handle GIFs specially - download directly without video processing
+            if media_type == 'gif':
+                logger.info(f"Processing GIF (direct download): {url}")
+                download_url = await self._get_download_url(url, media_type)
+                if not download_url:
+                    logger.warning(f"Could not get download URL for GIF: {url}")
+                    return None
+            
+            # Handle GIFV specially - convert to MP4 and download
+            elif media_type == 'gifv':
+                logger.info(f"Processing GIFV (converting to video): {url}")
+                download_url = await self._get_download_url(url, media_type)
+                if not download_url:
+                    logger.warning(f"Could not get download URL for GIFV: {url}")
+                    return None
+            
+            # For Reddit videos, we need to get the actual video URL from the post
             elif media_type == 'video' and 'v.redd.it' in url:
                 logger.info(f"Processing Reddit video for post {post_id}")
                 video_result = await self._get_reddit_video_url(post_id)
@@ -323,6 +336,9 @@ class RedditScraper:
                     return f"https://i.imgur.com/{imgur_id}.mp4"
                 else:
                     return f"https://i.imgur.com/{imgur_id}.jpg"
+            elif url.endswith('.gifv'):
+                # Convert .gifv to .mp4 for better compatibility
+                return url.replace('.gifv', '.mp4')
             return url
         
         # Gfycat - get the actual MP4 URL
@@ -367,7 +383,11 @@ class RedditScraper:
         from urllib.parse import urlparse
         path = urlparse(url).path
         if '.' in path:
-            return Path(path).suffix.lower()
+            ext = Path(path).suffix.lower()
+            # Convert .gifv to .mp4 for better compatibility
+            if ext == '.gifv':
+                return '.mp4'
+            return ext
         
         # Default
         return '.jpg'

@@ -442,20 +442,20 @@ Note: Make sure this bot is an admin in the target channel!"""
                         chat_id=target_channel,
                         photo=photo
                     )
-            elif approval_data['media_type'] == 'video':
-                # Check if it's a GIF (use send_animation) or regular video (use send_video)
-                if file_path.lower().endswith('.gif'):
-                    with open(file_path, 'rb') as animation:
-                        forwarded_message = await bot.send_animation(
-                            chat_id=target_channel,
-                            animation=animation
-                        )
-                else:
-                    with open(file_path, 'rb') as video:
-                        forwarded_message = await bot.send_video(
-                            chat_id=target_channel,
-                            video=video
-                        )
+            elif approval_data['media_type'] in ['video', 'gifv']:
+                # Regular video files (including converted GIFV)
+                with open(file_path, 'rb') as video:
+                    forwarded_message = await bot.send_video(
+                        chat_id=target_channel,
+                        video=video
+                    )
+            elif approval_data['media_type'] == 'gif':
+                # GIF files - send as animation for better Telegram display
+                with open(file_path, 'rb') as animation:
+                    forwarded_message = await bot.send_animation(
+                        chat_id=target_channel,
+                        animation=animation
+                    )
             else:
                 await query.edit_message_caption(caption=f"❌ Unsupported media type: {approval_data['media_type']}")
                 return

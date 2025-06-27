@@ -272,11 +272,21 @@ Approve this post?"""
                         caption=caption,
                         reply_markup=reply_markup
                     )
-            elif media_type == 'video':
+            elif media_type in ['video', 'gifv']:
+                # Regular video files (including converted GIFV)
                 with open(file_path, 'rb') as video:
                     sent_message = await self.application.bot.send_video(
                         chat_id=admin_id,
                         video=video,
+                        caption=caption,
+                        reply_markup=reply_markup
+                    )
+            elif media_type == 'gif':
+                # GIF files - send as animation for better Telegram display
+                with open(file_path, 'rb') as animation:
+                    sent_message = await self.application.bot.send_animation(
+                        chat_id=admin_id,
+                        animation=animation,
                         caption=caption,
                         reply_markup=reply_markup
                     )
