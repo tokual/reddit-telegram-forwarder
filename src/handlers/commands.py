@@ -150,6 +150,10 @@ Note: Make sure to add this bot as an admin to your target channel before creati
         """Handle text input during rule creation."""
         user = update.effective_user
         
+        # Skip if no user context (shouldn't happen, but defensive check)
+        if not user:
+            return
+        
         if not self.config.is_admin(user.id, user.username):
             return
         
