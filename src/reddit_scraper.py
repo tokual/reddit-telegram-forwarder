@@ -448,8 +448,8 @@ class RedditScraper:
         try:
             output_template = str(self.temp_dir / f"{post_id}.%(ext)s")
             
-            # Get timeout setting
-            timeout = getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120
+            # Get timeout setting - use longer timeout for video downloads (300s = 5 minutes)
+            timeout = getattr(self.config, 'video_timeout_seconds', 300) if self.config else 300
             
             # Find FFmpeg executable - check multiple common locations
             ffmpeg_path = shutil.which('ffmpeg')
