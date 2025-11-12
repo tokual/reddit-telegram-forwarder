@@ -11,9 +11,6 @@ yt-dlp>=2024.11.0
 requests==2.32.4
 Pillow==11.2.1
 
-# Optional: Video Encoding for Telegram
-handbrake-cli>=1.7.0
-
 # Database
 aiosqlite==0.21.0
 
