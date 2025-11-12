@@ -222,7 +222,11 @@ class RedditScraper:
             # Use yt-dlp for video downloads (especially Reddit videos with audio)
             if media_type == 'video' and YTDLP_AVAILABLE:
                 logger.info(f"Using yt-dlp to download video for post {post_id}")
-                file_path = await self._download_video_with_ytdlp(url, post_id)
+                # For Reddit videos, use the permalink (Reddit post URL) which yt-dlp can parse
+                # This ensures yt-dlp gets a valid Reddit URL it can extract video from
+                reddit_url = post_data.get('permalink', url)
+                logger.debug(f"yt-dlp URL: {reddit_url}")
+                file_path = await self._download_video_with_ytdlp(reddit_url, post_id)
                 if file_path:
                     logger.info(f"Downloaded media to: {file_path} (size: {Path(file_path).stat().st_size} bytes)")
                     
@@ -444,19 +448,71 @@ class RedditScraper:
         try:
             output_template = str(self.temp_dir / f"{post_id}.%(ext)s")
             
-            # Configure yt-dlp to merge best audio and video
+            # Get timeout setting
+            timeout = getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120
+            
+            # Find FFmpeg executable - check multiple common locations
+            ffmpeg_path = shutil.which('ffmpeg')
+            
+            # If not found via which, check common installation paths
+            if not ffmpeg_path:
+                common_paths = [
+                    '/usr/bin/ffmpeg',
+                    '/usr/local/bin/ffmpeg',
+                    '/opt/ffmpeg/bin/ffmpeg',
+                    '/home/pi/.local/bin/ffmpeg',
+                ]
+                for path in common_paths:
+                    if Path(path).exists():
+                        ffmpeg_path = path
+                        logger.info(f"Found FFmpeg at: {path}")
+                        break
+            
+            if ffmpeg_path:
+                logger.info(f"Using FFmpeg at: {ffmpeg_path}")
+            else:
+                logger.warning("FFmpeg not found - videos may download without audio")
+            
+            # Configure yt-dlp to download best quality available
+            # Prefer formats that already have audio+video combined (like mp4)
+            # Fallback to best single file if merge not possible
             ydl_opts = {
-                'format': 'bestvideo+bestaudio/best',
+                'format': 'best[ext=mp4]/best[ext=mkv]/best',
                 'outtmpl': output_template,
                 'quiet': False,
                 'no_warnings': False,
-                'socket_timeout': getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120,
                 'prefer_ffmpeg': True,
                 'keepvideo': False,
-                'postprocessor_args': ['-c:v', 'copy', '-c:a', 'aac', '-shortest'],
+                'socket_timeout': timeout,
+                # Add proper headers to handle Reddit's access restrictions
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+                    'Accept': '*/*',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Sec-Fetch-Dest': 'video',
+                    'Sec-Fetch-Mode': 'no-cors',
+                    'Sec-Fetch-Site': 'cross-site',
+                    'Range': 'bytes=0-',
+                },
+                # Use IPv4 only (sometimes IPv6 has issues)
+                'socket_family': 'AF_INET',
+                # Increase retries for stability
+                'retries': 10,
             }
             
-            logger.info(f"Downloading video with yt-dlp from {url}")
+            # Explicitly set FFmpeg location if found
+            if ffmpeg_path:
+                ydl_opts['ffmpeg_location'] = ffmpeg_path
+                # If we found FFmpeg, allow merging for best quality
+                ydl_opts['format'] = 'bestvideo+bestaudio/best[ext=mp4]/best'
+            
+            logger.info(f"Downloading video with yt-dlp from {url} (timeout: {timeout}s)")
+            
+            # Ensure system PATH is available for FFmpeg
+            import os
+            env = os.environ.copy()
+            if '/usr/bin' not in env.get('PATH', ''):
+                env['PATH'] = '/usr/bin:/usr/local/bin:' + env.get('PATH', '')
             
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
@@ -471,7 +527,9 @@ class RedditScraper:
                     return None
         
         except Exception as e:
-            logger.warning(f"yt-dlp download failed for {url}: {e}")
+            logger.error(f"yt-dlp download failed for {url}: {type(e).__name__}: {e}")
+            import traceback
+            logger.debug(f"yt-dlp traceback: {traceback.format_exc()}")
             return None
     
     async def _encode_video_for_telegram(self, input_path: str, post_id: str) -> Optional[str]:
@@ -479,9 +537,10 @@ class RedditScraper:
         Encode video with HandBrake for Telegram compatibility.
         
         Uses Telegram-optimized settings:
-        - H.264 video codec (VP9 fallback support)
+        - H.264 video codec
         - AAC audio codec
-        - Appropriate bitrates and resolution for web streaming
+        - Proper bitrates and resolution
+        - Web optimization for thumbnail generation and aspect ratio
         """
         if not self.handbrake_path:
             logger.warning("HandBrake not available, skipping encoding")
@@ -494,34 +553,24 @@ class RedditScraper:
             logger.info(f"Encoding video for Telegram: {input_file} -> {output_file}")
             
             # HandBrake CLI command for Telegram-optimized encoding
-            # Using preset "Fast 1080p30" for balance of speed and quality
             cmd = [
                 self.handbrake_path,
-                '--input', str(input_file),
-                '--output', str(output_file),
-                '--preset', 'Fast 1080p30',  # Optimized preset
-                '--encoder', 'x264',  # H.264 encoder
-                '--quality', '22',  # Quality level (18-51, lower is better, 22 is good default)
-                '--audio-codec', 'aac',  # AAC audio
-                '--audio-bitrate', '128',  # 128kbps audio
-                '--rate', '30',  # 30fps
-                '--vb', '3000',  # 3Mbps video bitrate (good for Telegram)
+                '-i', str(input_file),
+                '-o', str(output_file),
+                '-e', 'x264',  # H.264 encoder
+                '-q', '22',  # Quality level (18-28, lower is better)
+                '-a', '1',  # Audio track 1
+                '-E', 'aac',  # AAC audio codec
+                '-B', '128',  # Audio bitrate (128kbps)
                 '--loose-anamorphic',  # Preserve aspect ratio
-                '--modulus', '2',  # Ensure dimensions divisible by 2
-                '--decomb',  # Deinterlace if needed
-                '--denoise', 'ultralight',  # Light noise reduction
-                '--all-audio',  # Include all audio tracks
-                '--all-subtitles',  # Include subtitles if present
-                '--optimize',  # Web optimized MP4
+                '--optimize',  # Web optimized MP4 (fixes thumbnail and aspect ratio)
             ]
             
             # Add Raspberry Pi optimizations if enabled
             if self.config and getattr(self.config, 'raspberry_pi_mode', False):
                 logger.info("Using Raspberry Pi optimized settings")
                 cmd.extend([
-                    '--encoder-preset', 'faster',  # Faster encoding on slower hardware
-                    '--quality', '24',  # Slightly lower quality for faster encoding
-                    '--vb', '2000',  # 2Mbps for slower upload on Pi
+                    '-q', '24',  # Slightly lower quality for faster encoding
                 ])
             
             timeout = getattr(self.config, 'video_timeout_seconds', 300) if self.config else 300
