@@ -165,56 +165,44 @@ class RedditScraper:
         return any(path.endswith(ext) for ext in self.image_extensions | self.video_extensions)
     
     def _get_media_type(self, post) -> str:
-        """Determine the media type of a post."""
-        from urllib.parse import urlparse
-        path = urlparse(post.url).path.lower()
-        url_lower = post.url.lower()
+        """Determine the type of media in a post using PRAW properties.
         
-        # Check for Reddit gallery FIRST
-        if hasattr(post, 'is_gallery') and post.is_gallery:
-            return 'gallery'
-        
-        # Check for GIFs - treat them specially
-        if path.endswith('.gif'):
-            return 'gif'  # Special type for GIFs
-        elif path.endswith('.gifv'):
-            return 'gifv'  # Special type for GIFV (will be converted to video)
-        
-        # Check for video indicators
-        if hasattr(post, 'is_video') and post.is_video:
+        Returns:
+            'gallery': Reddit gallery posts
+            'video': Videos (Reddit native, external, yt-dlp compatible)
+            'image': Direct image files or image hosting services
+            'text': Text posts or non-media content
+        """
+        try:
+            # Check for Reddit gallery FIRST
+            if hasattr(post, 'gallery_data') and post.gallery_data:
+                return 'gallery'
+            
+            # Check for Reddit video
+            if hasattr(post, 'media') and post.media:
+                if 'reddit_video' in post.media:
+                    return 'video'
+            
+            # Check for direct image file extensions
+            image_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp')
+            if post.url.endswith(image_extensions):
+                return 'image'
+            
+            # Check for Reddit's own image CDN
+            if 'i.redd.it' in post.url or 'preview.redd.it' in post.url:
+                return 'image'
+            
+            # Check if it's a text/self post (no media to download)
+            if post.is_self:
+                return 'text'
+            
+            # For non-self posts with URLs we don't recognize,
+            # try yt-dlp (supports YouTube, TikTok, Twitter, Instagram, etc.)
             return 'video'
         
-        # Check for Reddit video
-        if hasattr(post, 'media') and post.media and 'reddit_video' in str(post.media):
-            return 'video'
-        
-        # Check URL extension for video files
-        if any(path.endswith(ext) for ext in self.video_extensions):
-            return 'video'
-        elif any(path.endswith(ext) for ext in self.image_extensions):
-            return 'image'
-        
-        # Check URL for video hosting sites
-        if 'v.redd.it' in url_lower:
-            return 'video'
-        elif 'gfycat.com' in url_lower:
-            return 'video'
-        elif 'redgifs.com' in url_lower:
-            return 'video'
-        elif 'streamable.com' in url_lower:
-            return 'video'
-        # Skip YouTube and other external video sites for now
-        # elif 'youtube.com' in url_lower or 'youtu.be' in url_lower:
-        #     return 'video'
-        
-        # For Imgur, check if it might be a video
-        if 'imgur.com' in url_lower:
-            # Imgur can host both images and videos
-            # We'll try to determine this during download
-            return 'image'  # Default to image, will be corrected during download if needed
-        
-        # Default to image for unknown types that have media
-        return 'image'
+        except Exception as e:
+            logger.error(f"Error determining media type: {e}")
+            return 'text'
     
     async def download_media(self, post_data: Dict[str, Any]) -> Optional[str]:
         """
@@ -252,14 +240,17 @@ class RedditScraper:
                     logger.warning(f"Gallery post missing gallery_data or media_metadata")
                     return None
             
-            # Use yt-dlp for video downloads (especially Reddit videos with audio)
-            if media_type == 'video' and YTDLP_AVAILABLE:
-                logger.info(f"Using yt-dlp to download video for post {post_id}")
-                # For Reddit videos, use the permalink (Reddit post URL) which yt-dlp can parse
-                # This ensures yt-dlp gets a valid Reddit URL it can extract video from
+            # Use yt-dlp for video downloads and any URL it can handle
+            if media_type == 'video':
+                if not YTDLP_AVAILABLE:
+                    logger.warning(f"yt-dlp not available, cannot process: {url}")
+                    return None
+                
+                logger.info(f"Using yt-dlp to download from {url}")
+                # For Reddit videos, use the permalink which yt-dlp can parse
                 reddit_url = post_data.get('permalink', url)
-                logger.debug(f"yt-dlp URL: {reddit_url}")
                 file_path = await self._download_video_with_ytdlp(reddit_url, post_id)
+                
                 if file_path:
                     logger.info(f"Downloaded media to: {file_path} (size: {Path(file_path).stat().st_size} bytes)")
                     
@@ -281,8 +272,9 @@ class RedditScraper:
                         logger.debug("HandBrake not available, returning video without re-encoding")
                         return file_path
                 else:
-                    logger.warning(f"yt-dlp download failed, falling back to direct download")
-                    # Fall through to standard download
+                    # yt-dlp failed - this URL is likely not downloadable
+                    logger.warning(f"yt-dlp could not download from {url}")
+                    return None
             
             # For non-video content or if yt-dlp is unavailable, use direct download
             if media_type == 'gif':
@@ -632,6 +624,10 @@ class RedditScraper:
                     logger.warning(f"yt-dlp output file is invalid or empty: {filename}")
                     return None
         
+        except yt_dlp.utils.DownloadError as e:
+            # URL not supported by yt-dlp or extraction failed
+            logger.debug(f"yt-dlp cannot handle URL {url}: {str(e)[:100]}")
+            return None
         except Exception as e:
             logger.error(f"yt-dlp download failed for {url}: {type(e).__name__}: {e}")
             import traceback
