@@ -198,4 +198,4 @@ cython_debug/
 *.session
 temp/
 logs/
-data/
+data/.DS_Store

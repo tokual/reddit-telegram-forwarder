@@ -8,6 +8,16 @@
    sudo apt update
    sudo apt install ffmpeg
    ```
+3. **HandBrake CLI** for video encoding (optional but recommended):
+   ```bash
+   # On Raspberry Pi / Debian / Ubuntu:
+   sudo apt install handbrake-cli
+   
+   # On macOS with Homebrew:
+   brew install handbrake
+   
+   # On other systems, see: https://handbrake.fr/downloads.php
+   ```
 
 ## Installation
 

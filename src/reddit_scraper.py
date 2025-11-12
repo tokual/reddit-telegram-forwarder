@@ -11,13 +11,13 @@ import requests
 import praw
 from PIL import Image
 
-# Try to import ffmpeg-python, but don't fail if it's not available
+# Try to import yt-dlp for reliable video downloads
 try:
-    import ffmpeg
-    FFMPEG_PYTHON_AVAILABLE = True
+    import yt_dlp
+    YTDLP_AVAILABLE = True
 except ImportError:
-    FFMPEG_PYTHON_AVAILABLE = False
-    ffmpeg = None
+    YTDLP_AVAILABLE = False
+    yt_dlp = None
 
 logger = logging.getLogger(__name__)
 
@@ -42,11 +42,18 @@ class RedditScraper:
         self.image_extensions = {'.jpg', '.jpeg', '.png', '.webp'}
         self.video_extensions = {'.mp4', '.webm', '.mov', '.avi', '.gif'}
         
-        # Find FFmpeg executable
-        self.ffmpeg_path = self._find_ffmpeg_executable()
-        if not self.ffmpeg_path:
-            logger.warning("FFmpeg not found in PATH - video+audio combination will not work")
-    
+        if not YTDLP_AVAILABLE:
+            logger.warning("yt-dlp not installed - video downloads may fail or have no audio")
+        else:
+            logger.info("yt-dlp is available for reliable video downloads")
+        
+        # Check for HandBrake
+        self.handbrake_path = self._find_handbrake_executable()
+        if not self.handbrake_path:
+            logger.warning("HandBrake not found in PATH - videos will not be re-encoded for Telegram")
+        else:
+            logger.info(f"HandBrake found at: {self.handbrake_path}")
+        
         logger.info("Reddit scraper initialized")
     
     async def scrape_subreddit(self, subreddit_name: str, sort_type: str = 'hot', 
@@ -212,7 +219,35 @@ class RedditScraper:
             
             logger.info(f"Downloading media for post {post_id}: {url}")
             
-            # Handle GIFs specially - download directly without video processing
+            # Use yt-dlp for video downloads (especially Reddit videos with audio)
+            if media_type == 'video' and YTDLP_AVAILABLE:
+                logger.info(f"Using yt-dlp to download video for post {post_id}")
+                file_path = await self._download_video_with_ytdlp(url, post_id)
+                if file_path:
+                    logger.info(f"Downloaded media to: {file_path} (size: {Path(file_path).stat().st_size} bytes)")
+                    
+                    # Encode video for Telegram compatibility if HandBrake is available
+                    if self.handbrake_path:
+                        encoded_path = await self._encode_video_for_telegram(file_path, post_id)
+                        if encoded_path:
+                            logger.info(f"Successfully encoded video for Telegram: {encoded_path}")
+                            # Clean up original downloaded file
+                            try:
+                                Path(file_path).unlink()
+                            except:
+                                pass
+                            return encoded_path
+                        else:
+                            logger.warning(f"Video encoding failed, using original: {file_path}")
+                            return file_path
+                    else:
+                        logger.debug("HandBrake not available, returning video without re-encoding")
+                        return file_path
+                else:
+                    logger.warning(f"yt-dlp download failed, falling back to direct download")
+                    # Fall through to standard download
+            
+            # For non-video content or if yt-dlp is unavailable, use direct download
             if media_type == 'gif':
                 logger.info(f"Processing GIF (direct download): {url}")
                 download_url = await self._get_download_url(url, media_type)
@@ -220,7 +255,6 @@ class RedditScraper:
                     logger.warning(f"Could not get download URL for GIF: {url}")
                     return None
             
-            # Handle GIFV specially - convert to MP4 and download
             elif media_type == 'gifv':
                 logger.info(f"Processing GIFV (converting to video): {url}")
                 download_url = await self._get_download_url(url, media_type)
@@ -228,29 +262,8 @@ class RedditScraper:
                     logger.warning(f"Could not get download URL for GIFV: {url}")
                     return None
             
-            # For Reddit videos, we need to get the actual video URL from the post
-            elif media_type == 'video' and 'v.redd.it' in url:
-                logger.info(f"Processing Reddit video for post {post_id}")
-                video_result = await self._get_reddit_video_url(post_id)
-                if video_result:
-                    # Check if the result is a local file path (already downloaded and processed)
-                    if video_result.startswith('/') or video_result.startswith(str(self.temp_dir)):
-                        # It's already a local file, validate it exists and has content
-                        if os.path.exists(video_result) and os.path.getsize(video_result) > 0:
-                            logger.info(f"Using pre-processed Reddit video: {video_result}")
-                            return video_result
-                        else:
-                            logger.warning(f"Pre-processed video file is invalid: {video_result}")
-                            return None
-                    else:
-                        # It's a URL, use it for standard download
-                        logger.info(f"Using Reddit video URL for download: {video_result}")
-                        download_url = video_result
-                else:
-                    logger.error(f"Failed to get Reddit video URL for post {post_id}")
-                    return None
             else:
-                # For all other media types (images, non-Reddit videos), handle URL types normally
+                # For all other media types (images, non-Reddit videos)
                 download_url = await self._get_download_url(url, media_type)
                 if not download_url:
                     logger.warning(f"Could not get download URL for {url}")
@@ -426,244 +439,95 @@ class RedditScraper:
             # Return original path even if validation failed
             return file_path
     
-    async def _get_reddit_video_url(self, post_id: str) -> Optional[str]:
-        """Get the direct video URL for a Reddit-hosted video with clear fallback strategy."""
+    async def _download_video_with_ytdlp(self, url: str, post_id: str) -> Optional[str]:
+        """Download video using yt-dlp, which handles audio+video combination automatically."""
         try:
-            # Fetch the post again to get complete media data
-            submission = self.reddit.submission(id=post_id)
+            output_template = str(self.temp_dir / f"{post_id}.%(ext)s")
             
-            # Strategy 1: Try to get video with audio combination
-            if hasattr(submission, 'media') and submission.media:
-                reddit_video = submission.media.get('reddit_video')
-                if reddit_video:
-                    fallback_url = reddit_video.get('fallback_url')
-                    if fallback_url:
-                        logger.info(f"Found Reddit video fallback URL: {fallback_url}")
-                        
-                        # Try to download and combine with audio (this may fail, that's OK)
-                        try:
-                            combined_path = await self._download_and_combine_reddit_video(post_id, fallback_url)
-                            if combined_path and os.path.exists(combined_path):
-                                logger.info(f"Video processing successful: {combined_path}")
-                                return combined_path
-                            else:
-                                logger.warning(f"Video processing returned empty result, using fallback URL")
-                        except Exception as e:
-                            logger.info(f"Video processing failed: {e}, using fallback URL")
-                        
-                        # Fallback: Return the video-only URL for standard download
-                        logger.info(f"Using video-only URL: {fallback_url}")
-                        return fallback_url
+            # Configure yt-dlp to merge best audio and video
+            ydl_opts = {
+                'format': 'bestvideo+bestaudio/best',
+                'outtmpl': output_template,
+                'quiet': False,
+                'no_warnings': False,
+                'socket_timeout': getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120,
+                'prefer_ffmpeg': True,
+                'keepvideo': False,
+                'postprocessor_args': ['-c:v', 'copy', '-c:a', 'aac', '-shortest'],
+            }
             
-            # Strategy 2: Try to construct DASH URLs from submission URL
-            if hasattr(submission, 'is_video') and submission.is_video and 'v.redd.it' in submission.url:
-                base_url = submission.url.rstrip('/')
+            logger.info(f"Downloading video with yt-dlp from {url}")
+            
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                filename = ydl.prepare_filename(info)
                 
-                # Try different quality options
-                for quality in ['DASH_720.mp4', 'DASH_480.mp4', 'DASH_360.mp4', 'DASH_240.mp4']:
-                    test_url = f"{base_url}/{quality}"
-                    try:
-                        response = requests.head(test_url, timeout=5)
-                        if response.status_code == 200:
-                            logger.info(f"Found Reddit video at quality {quality}: {test_url}")
-                            return test_url
-                    except:
-                        continue
-                        
-                # Last resort: try the base URL with a generic quality
-                fallback_url = f"{base_url}/DASH_720.mp4"
-                logger.info(f"Using constructed fallback URL: {fallback_url}")
-                return fallback_url
-            
-            logger.warning(f"Could not find video URL for Reddit post {post_id}")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Error getting Reddit video URL for post {post_id}: {e}")
-            return None
-    
-    async def _download_and_combine_reddit_video(self, post_id: str, video_url: str) -> Optional[str]:
-        """Download and combine Reddit video and audio streams with robust fallback inspired by yt-dlp."""
-        video_temp = None
-        audio_temp = None
-        output_temp = None
-        
-        try:
-            # Extract base URL and construct potential audio URLs
-            base_url = video_url.split('/DASH_')[0]
-            
-            # Try multiple audio URL patterns (Reddit can use different formats)
-            audio_urls = [
-                f"{base_url}/DASH_audio.mp4",
-                f"{base_url}/DASH_AUDIO_128.mp4",  # Alternative format
-                f"{base_url}/audio",  # Simple fallback
-            ]
-            
-            # Create temporary file paths
-            video_temp = self.temp_dir / f"{post_id}_video.mp4"
-            audio_temp = self.temp_dir / f"{post_id}_audio.mp4"
-            output_temp = self.temp_dir / f"{post_id}.mp4"
-            
-            logger.info(f"Attempting video+audio combination for post {post_id}")
-            
-            # Step 1: Download video stream (REQUIRED)
-            logger.info(f"Downloading video stream: {video_url}")
-            video_timeout = self.config.video_timeout_seconds if self.config else 60
-            video_response = requests.get(video_url, stream=True, timeout=video_timeout,
-                                        headers={
-                                            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                            'Accept': '*/*',
-                                            'Accept-Encoding': 'identity'  # Disable compression for better reliability
-                                        })
-            video_response.raise_for_status()
-            
-            with open(video_temp, 'wb') as f:
-                for chunk in video_response.iter_content(chunk_size=8192):
-                    f.write(chunk)
-            
-            # Verify video was downloaded and has reasonable size
-            if not video_temp.exists() or video_temp.stat().st_size < 1024:  # At least 1KB
-                logger.error("Video download failed - file is empty or too small")
-                return None
-            
-            logger.info(f"Video downloaded: {video_temp.stat().st_size} bytes")
-            
-            # Step 2: Try to download audio stream from multiple URLs
-            audio_downloaded = False
-            audio_url_used = None
-            
-            for audio_url in audio_urls:
-                try:
-                    logger.debug(f"Trying audio URL: {audio_url}")
-                    audio_timeout = self.config.audio_timeout_seconds if self.config else 30
-                    audio_response = requests.get(audio_url, stream=True, timeout=audio_timeout,
-                                                headers={
-                                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-                                                    'Accept': '*/*',
-                                                    'Accept-Encoding': 'identity'
-                                                })
-                    
-                    if audio_response.status_code == 200:
-                        # Check content-type to ensure it's actually audio
-                        content_type = audio_response.headers.get('content-type', '').lower()
-                        if 'audio' in content_type or 'video' in content_type:  # video/mp4 can contain audio
-                            with open(audio_temp, 'wb') as f:
-                                for chunk in audio_response.iter_content(chunk_size=8192):
-                                    f.write(chunk)
-                            
-                            # Verify audio was downloaded and has reasonable size
-                            if audio_temp.exists() and audio_temp.stat().st_size > 1024:  # At least 1KB
-                                audio_downloaded = True
-                                audio_url_used = audio_url
-                                logger.info(f"Audio downloaded from {audio_url}: {audio_temp.stat().st_size} bytes")
-                                break
-                            else:
-                                logger.debug(f"Audio file from {audio_url} too small, trying next")
-                        else:
-                            logger.debug(f"Invalid content-type from {audio_url}: {content_type}")
-                    else:
-                        logger.debug(f"Audio not available from {audio_url} (HTTP {audio_response.status_code})")
-                        
-                except Exception as audio_error:
-                    logger.debug(f"Audio download failed from {audio_url}: {audio_error}")
-                    continue
-            
-            # Step 3: Combine video+audio if both available
-            if audio_downloaded:
-                logger.info(f"Combining video and audio with ffmpeg (audio from: {audio_url_used})")
-                
-                # Use subprocess-based combination to avoid PATH issues
-                combination_success = self._combine_video_audio_subprocess(
-                    str(video_temp), str(audio_temp), str(output_temp)
-                )
-                
-                if combination_success and output_temp.exists() and output_temp.stat().st_size > video_temp.stat().st_size * 0.8:
-                    # Combined file should be at least 80% of video size (reasonable check)
-                    logger.info(f"Video+audio combined successfully: {output_temp.stat().st_size} bytes")
-                    
-                    # Clean up temporary files
-                    video_temp.unlink(missing_ok=True)
-                    audio_temp.unlink(missing_ok=True)
-                    
-                    return str(output_temp)
+                file_path = Path(filename)
+                if file_path.exists() and file_path.stat().st_size > 0:
+                    logger.info(f"yt-dlp successfully downloaded: {filename} ({file_path.stat().st_size} bytes)")
+                    return str(file_path)
                 else:
-                    logger.warning("ffmpeg combination failed or output too small, falling back to video-only")
-                    if output_temp.exists():
-                        output_temp.unlink(missing_ok=True)
-            
-            # Step 4: Fallback to video-only
-            logger.info("Using video-only (no audio or combination failed)")
-            
-            # Move video file to final output name
-            if video_temp and video_temp.exists() and video_temp.stat().st_size > 0:
-                try:
-                    # Ensure output file doesn't already exist
-                    if output_temp.exists():
-                        output_temp.unlink()
-                    
-                    video_temp.rename(output_temp)
-                    logger.info(f"Video-only file ready: {output_temp.stat().st_size} bytes")
-                    
-                    # Clean up audio file if it exists
-                    if audio_temp and audio_temp.exists():
-                        audio_temp.unlink(missing_ok=True)
-                    
-                    return str(output_temp)
-                except Exception as move_error:
-                    logger.warning(f"Failed to move video file: {move_error}")
-                    # Last resort: return the video temp file directly
-                    if video_temp.exists() and video_temp.stat().st_size > 0:
-                        logger.info(f"Using temp video file directly: {video_temp}")
-                        return str(video_temp)
-            
-            logger.error("No valid video file available for fallback")
-            return None
-            
-        except Exception as e:
-            logger.error(f"Critical error in video processing for post {post_id}: {e}")
-            return None
-            
-        finally:
-            # Emergency cleanup - ensure no temp files are left behind
-            for temp_file in [video_temp, audio_temp]:
-                try:
-                    if temp_file and temp_file.exists() and temp_file != output_temp:
-                        temp_file.unlink(missing_ok=True)
-                except:
-                    pass
-    
-    def _combine_video_audio_subprocess(self, video_path: str, audio_path: str, output_path: str) -> bool:
-        """Combine video and audio using subprocess for better PATH control."""
-        if not self.ffmpeg_path:
-            logger.error("FFmpeg executable not found - cannot combine video and audio")
-            return False
+                    logger.warning(f"yt-dlp output file is invalid or empty: {filename}")
+                    return None
         
-        # Get timeout from config or use default
-        timeout = getattr(self.config, 'video_timeout_seconds', 120) if self.config else 120
+        except Exception as e:
+            logger.warning(f"yt-dlp download failed for {url}: {e}")
+            return None
+    
+    async def _encode_video_for_telegram(self, input_path: str, post_id: str) -> Optional[str]:
+        """
+        Encode video with HandBrake for Telegram compatibility.
+        
+        Uses Telegram-optimized settings:
+        - H.264 video codec (VP9 fallback support)
+        - AAC audio codec
+        - Appropriate bitrates and resolution for web streaming
+        """
+        if not self.handbrake_path:
+            logger.warning("HandBrake not available, skipping encoding")
+            return None
         
         try:
-            # Build FFmpeg command
+            input_file = Path(input_path)
+            output_file = self.temp_dir / f"{post_id}_encoded.mp4"
+            
+            logger.info(f"Encoding video for Telegram: {input_file} -> {output_file}")
+            
+            # HandBrake CLI command for Telegram-optimized encoding
+            # Using preset "Fast 1080p30" for balance of speed and quality
             cmd = [
-                self.ffmpeg_path,
-                '-i', video_path,
-                '-i', audio_path,
-                '-c:v', 'copy',  # Copy video stream
-                '-c:a', 'aac',   # Re-encode audio to AAC
-                '-shortest',     # Match shortest stream
-                '-avoid_negative_ts', 'make_zero',
-                '-y',            # Overwrite output
-                output_path
+                self.handbrake_path,
+                '--input', str(input_file),
+                '--output', str(output_file),
+                '--preset', 'Fast 1080p30',  # Optimized preset
+                '--encoder', 'x264',  # H.264 encoder
+                '--quality', '22',  # Quality level (18-51, lower is better, 22 is good default)
+                '--audio-codec', 'aac',  # AAC audio
+                '--audio-bitrate', '128',  # 128kbps audio
+                '--rate', '30',  # 30fps
+                '--vb', '3000',  # 3Mbps video bitrate (good for Telegram)
+                '--loose-anamorphic',  # Preserve aspect ratio
+                '--modulus', '2',  # Ensure dimensions divisible by 2
+                '--decomb',  # Deinterlace if needed
+                '--denoise', 'ultralight',  # Light noise reduction
+                '--all-audio',  # Include all audio tracks
+                '--all-subtitles',  # Include subtitles if present
+                '--optimize',  # Web optimized MP4
             ]
             
             # Add Raspberry Pi optimizations if enabled
             if self.config and getattr(self.config, 'raspberry_pi_mode', False):
-                # Insert optimization flags before output path
-                optimization_flags = ['-threads', '2', '-preset', 'ultrafast']
-                cmd = cmd[:-1] + optimization_flags + cmd[-1:]
+                logger.info("Using Raspberry Pi optimized settings")
+                cmd.extend([
+                    '--encoder-preset', 'faster',  # Faster encoding on slower hardware
+                    '--quality', '24',  # Slightly lower quality for faster encoding
+                    '--vb', '2000',  # 2Mbps for slower upload on Pi
+                ])
             
-            logger.debug(f"Running FFmpeg command: {' '.join(cmd)}")
+            timeout = getattr(self.config, 'video_timeout_seconds', 300) if self.config else 300
             
-            # Run FFmpeg
+            logger.debug(f"Running HandBrake: {' '.join(cmd)}")
+            
             result = subprocess.run(
                 cmd,
                 capture_output=True,
@@ -671,23 +535,37 @@ class RedditScraper:
                 timeout=timeout
             )
             
-            if result.returncode == 0:
-                logger.debug("FFmpeg combination successful")
-                return True
+            if result.returncode == 0 and output_file.exists() and output_file.stat().st_size > 0:
+                logger.info(f"Video encoding successful: {output_file} ({output_file.stat().st_size} bytes)")
+                return str(output_file)
             else:
-                logger.error(f"FFmpeg failed with return code {result.returncode}")
-                logger.error(f"FFmpeg stderr: {result.stderr}")
-                return False
-                
+                logger.error(f"HandBrake encoding failed with return code {result.returncode}")
+                if result.stderr:
+                    logger.error(f"HandBrake stderr: {result.stderr[:500]}")
+                # Clean up incomplete output file
+                if output_file.exists():
+                    output_file.unlink()
+                return None
+        
         except subprocess.TimeoutExpired:
-            logger.error(f"FFmpeg combination timed out after {timeout} seconds")
-            return False
+            logger.error(f"HandBrake encoding timed out after {timeout} seconds")
+            return None
         except FileNotFoundError:
-            logger.error(f"FFmpeg executable not found at: {self.ffmpeg_path}")
-            return False
+            logger.error(f"HandBrake executable not found at: {self.handbrake_path}")
+            return None
         except Exception as e:
-            logger.error(f"FFmpeg combination failed: {e}")
-            return False
+            logger.error(f"Video encoding failed: {e}")
+            return None
+    
+    async def _get_reddit_video_url(self, post_id: str) -> Optional[str]:
+        """Get Reddit video URL - now primarily used with yt-dlp."""
+        try:
+            submission = self.reddit.submission(id=post_id)
+            # Return submission URL which yt-dlp can handle
+            return submission.url
+        except Exception as e:
+            logger.error(f"Error getting Reddit video URL for post {post_id}: {e}")
+            return None
     
     def cleanup_temp_files(self, max_age_hours: int = 24):
         """Clean up old temporary files."""
@@ -706,25 +584,22 @@ class RedditScraper:
         except Exception as e:
             logger.error(f"Error cleaning up temp files: {e}")
     
-    def _find_ffmpeg_executable(self) -> Optional[str]:
-        """Find the FFmpeg executable in the system."""
-        # First try config if available
-        if self.config and hasattr(self.config, 'ffmpeg_path'):
-            config_path = getattr(self.config, 'ffmpeg_path', None)
-            if config_path and shutil.which(config_path):
-                return config_path
-        
+    def _find_handbrake_executable(self) -> Optional[str]:
+        """Find the HandBrake CLI executable in the system."""
         # Try common locations
         possible_paths = [
-            'ffmpeg',  # In PATH
-            '/usr/bin/ffmpeg',  # Common Linux location
-            '/usr/local/bin/ffmpeg',  # Common macOS/Linux location
-            '/opt/homebrew/bin/ffmpeg',  # Apple Silicon macOS
+            'HandBrakeCLI',  # In PATH
+            'handbrakecli',  # Linux lowercase
+            '/usr/bin/HandBrakeCLI',  # Linux
+            '/usr/local/bin/HandBrakeCLI',  # macOS
+            '/opt/homebrew/bin/HandBrakeCLI',  # Apple Silicon macOS
+            'C:\\Program Files\\HandBrake\\HandBrakeCLI.exe',  # Windows
+            'C:\\Program Files (x86)\\HandBrake\\HandBrakeCLI.exe',  # Windows 32-bit
         ]
         
         for path in possible_paths:
             if shutil.which(path):
-                logger.info(f"Found FFmpeg at: {path}")
+                logger.info(f"Found HandBrake at: {path}")
                 return path
         
         return None
