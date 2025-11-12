@@ -98,6 +98,8 @@ class RedditScraper:
                 if not self._has_media(post):
                     continue
                 
+                media_type = self._get_media_type(post)
+                
                 post_data = {
                     'id': post.id,
                     'subreddit': subreddit_name,
@@ -109,9 +111,14 @@ class RedditScraper:
                     'score': post.score,
                     'num_comments': post.num_comments,
                     'upvote_ratio': post.upvote_ratio,
-                    'media_type': self._get_media_type(post),
+                    'media_type': media_type,
                     'thumbnail': getattr(post, 'thumbnail', None)
                 }
+                
+                # Store gallery metadata if it's a gallery post
+                if media_type == 'gallery':
+                    post_data['gallery_data'] = getattr(post, 'gallery_data', None)
+                    post_data['media_metadata'] = getattr(post, 'media_metadata', None)
                 
                 media_posts.append(post_data)
             
@@ -163,7 +170,11 @@ class RedditScraper:
         path = urlparse(post.url).path.lower()
         url_lower = post.url.lower()
         
-        # Check for GIFs first - treat them specially
+        # Check for Reddit gallery FIRST
+        if hasattr(post, 'is_gallery') and post.is_gallery:
+            return 'gallery'
+        
+        # Check for GIFs - treat them specially
         if path.endswith('.gif'):
             return 'gif'  # Special type for GIFs
         elif path.endswith('.gifv'):
@@ -218,6 +229,28 @@ class RedditScraper:
             post_id = post_data['id']
             
             logger.info(f"Downloading media for post {post_id}: {url}")
+            
+            # Handle gallery posts - extract actual image URLs from Reddit metadata
+            if media_type == 'gallery':
+                logger.info(f"Processing Reddit gallery for post {post_id}")
+                gallery_data = post_data.get('gallery_data')
+                media_metadata = post_data.get('media_metadata')
+                
+                if gallery_data and media_metadata:
+                    gallery_images = self._extract_gallery_images(gallery_data, media_metadata)
+                    if gallery_images:
+                        logger.info(f"Found {len(gallery_images)} images in gallery, downloading first")
+                        # Download first image from gallery
+                        first_image_url = gallery_images[0]
+                        file_path = await self._download_file(first_image_url, post_id, 'jpg')
+                        if file_path:
+                            return await self._validate_and_convert_image(file_path)
+                    else:
+                        logger.warning(f"Could not extract image URLs from gallery metadata")
+                        return None
+                else:
+                    logger.warning(f"Gallery post missing gallery_data or media_metadata")
+                    return None
             
             # Use yt-dlp for video downloads (especially Reddit videos with audio)
             if media_type == 'video' and YTDLP_AVAILABLE:
@@ -408,6 +441,79 @@ class RedditScraper:
         
         # Default
         return '.jpg'
+    
+    def _extract_gallery_images(self, gallery_data: Dict[str, Any], media_metadata: Dict[str, Any]) -> List[str]:
+        """
+        Extract actual image URLs from Reddit gallery metadata.
+        
+        Args:
+            gallery_data: Gallery structure from post.gallery_data
+            media_metadata: Media metadata from post.media_metadata
+        
+        Returns:
+            List of image URLs from the gallery
+        """
+        try:
+            image_urls = []
+            
+            # gallery_data contains items with media_id references
+            gallery_items = gallery_data.get('items', [])
+            
+            for item in gallery_items:
+                media_id = item.get('media_id')
+                if not media_id or media_id not in media_metadata:
+                    continue
+                
+                media_info = media_metadata[media_id]
+                media_type = media_info.get('type')
+                
+                # Only process images, skip videos in galleries
+                if media_type == 'image':
+                    # Extract image URL - it's in the 's' key under various formats
+                    if 's' in media_info and 'u' in media_info['s']:
+                        image_url = media_info['s']['u']
+                        image_urls.append(image_url)
+                        logger.debug(f"Extracted gallery image: {image_url}")
+            
+            return image_urls
+        
+        except Exception as e:
+            logger.error(f"Error extracting gallery images: {e}")
+            return []
+    
+    async def _download_file(self, url: str, post_id: str, default_ext: str = 'jpg') -> Optional[str]:
+        """Download a file from a URL and save to temp directory."""
+        try:
+            logger.info(f"Downloading file from URL: {url}")
+            
+            response = requests.get(url, stream=True, timeout=30,
+                                  headers={'User-Agent': 'Mozilla/5.0 (compatible; RedditBot/1.0)'})
+            response.raise_for_status()
+            
+            # Determine file extension
+            content_type = response.headers.get('content-type', '')
+            extension = self._get_extension_from_content_type(content_type, url)
+            
+            # Create temporary file
+            file_path = self.temp_dir / f"{post_id}{extension}"
+            
+            # Save file
+            with open(file_path, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+            
+            # Validate file size
+            if file_path.stat().st_size == 0:
+                logger.warning(f"Downloaded file is empty: {file_path}")
+                file_path.unlink()
+                return None
+            
+            logger.info(f"Downloaded file to: {file_path} ({file_path.stat().st_size} bytes)")
+            return str(file_path)
+        
+        except Exception as e:
+            logger.error(f"Failed to download file from {url}: {e}")
+            return None
     
     async def _validate_and_convert_image(self, file_path: Path) -> Path:
         """Validate and potentially convert image to a supported format."""
