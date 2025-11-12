@@ -532,9 +532,36 @@ class RedditScraper:
             logger.debug(f"yt-dlp traceback: {traceback.format_exc()}")
             return None
     
+    def _get_video_duration(self, video_path: str) -> Optional[float]:
+        """Get video duration in seconds using ffprobe."""
+        try:
+            result = subprocess.run(
+                [
+                    'ffprobe',
+                    '-v', 'error',
+                    '-show_entries', 'format=duration',
+                    '-of', 'default=noprint_wrappers=1:nokey=1:novalidate=1',
+                    video_path
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10
+            )
+            
+            if result.returncode == 0 and result.stdout.strip():
+                duration = float(result.stdout.strip())
+                logger.debug(f"Video duration: {duration:.1f} seconds")
+                return duration
+        except (FileNotFoundError, ValueError, subprocess.TimeoutExpired) as e:
+            logger.debug(f"Could not determine video duration: {e}")
+        
+        return None
+    
     async def _encode_video_for_telegram(self, input_path: str, post_id: str) -> Optional[str]:
         """
         Encode video with HandBrake for Telegram compatibility.
+        
+        Skips encoding for long videos that won't complete in time.
         
         Uses Telegram-optimized settings:
         - H.264 video codec
@@ -548,6 +575,24 @@ class RedditScraper:
         
         try:
             input_file = Path(input_path)
+            
+            # Check video duration to avoid long encoding times
+            duration = self._get_video_duration(str(input_file))
+            
+            # Raspberry Pi: skip encoding for videos longer than 2 minutes (120s)
+            # Regular systems: skip for videos longer than 10 minutes (600s)
+            if self.config and getattr(self.config, 'raspberry_pi_mode', False):
+                max_duration = 120  # 2 minutes
+            else:
+                max_duration = 600  # 10 minutes
+            
+            if duration and duration > max_duration:
+                logger.info(
+                    f"Video {post_id} is {duration:.0f}s long (max {max_duration}s for this system). "
+                    f"Skipping encoding to stay within 5-minute processing window."
+                )
+                return None  # Return None to use original yt-dlp file
+            
             output_file = self.temp_dir / f"{post_id}_encoded.mp4"
             
             logger.info(f"Encoding video for Telegram: {input_file} -> {output_file}")
@@ -573,9 +618,10 @@ class RedditScraper:
                     '-q', '24',  # Slightly lower quality for faster encoding
                 ])
             
-            timeout = getattr(self.config, 'video_timeout_seconds', 300) if self.config else 300
+            # Use 5-minute timeout for encoding
+            timeout = 300
             
-            logger.debug(f"Running HandBrake: {' '.join(cmd)}")
+            logger.debug(f"Running HandBrake with {timeout}s timeout: {' '.join(cmd)}")
             
             result = subprocess.run(
                 cmd,
@@ -597,7 +643,7 @@ class RedditScraper:
                 return None
         
         except subprocess.TimeoutExpired:
-            logger.error(f"HandBrake encoding timed out after {timeout} seconds")
+            logger.error(f"HandBrake encoding timed out after {timeout} seconds - video too long or system too slow")
             return None
         except FileNotFoundError:
             logger.error(f"HandBrake executable not found at: {self.handbrake_path}")
