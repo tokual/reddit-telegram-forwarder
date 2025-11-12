@@ -1,14 +1,16 @@
 # Reddit Telegram Forwarder Bot
 
-A Telegram bot that scrapes Reddit posts and forwards them to Telegram channels after admin approval.
+A Telegram bot that scrapes Reddit posts and forwards them to Telegram channels after admin approval. Videos are automatically downloaded with audio preserved using yt-dlp.
 
 ## Features
 
 - 🔍 Scrapes images/videos from specified subreddits
+- 🎬 Downloads Reddit videos with **audio guaranteed** (using yt-dlp + FFmpeg)
+- 📱 Videos optimized for Telegram (proper thumbnails & aspect ratio via HandBrake)
 - ✅ Admin approval workflow before forwarding
 - 🚫 Duplicate prevention
 - ⏰ Configurable check frequency
-- � Whitelist-based admin access
+- 🔐 Whitelist-based admin access
 
 ## Quick Setup
 
@@ -96,6 +98,9 @@ Edit `admins.txt` with your Telegram user ID:
 ## Requirements
 
 - Python 3.8+
+- FFmpeg (for video audio merging)
+- yt-dlp (installed via pip)
+- HandBrake CLI (for video encoding)
 - Internet connection
 - Telegram Bot Token
 - Reddit API credentials

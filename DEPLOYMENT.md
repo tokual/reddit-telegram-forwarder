@@ -3,12 +3,13 @@
 ## Prerequisites
 
 1. **Python 3.8+** installed on Raspberry Pi
-2. **FFmpeg** for video processing:
+2. **FFmpeg** for video audio merging:
    ```bash
    sudo apt update
    sudo apt install ffmpeg
    ```
-3. **HandBrake CLI** for video encoding (optional but recommended):
+3. **yt-dlp** for reliable Reddit video downloads (installed via pip - included in requirements.txt)
+4. **HandBrake CLI** for professional video encoding (required for proper Telegram display):
    ```bash
    # On Raspberry Pi / Debian / Ubuntu:
    sudo apt install handbrake-cli
@@ -18,6 +19,31 @@
    
    # On other systems, see: https://handbrake.fr/downloads.php
    ```
+
+## Recent Fixes
+
+### Video Processing Pipeline (All Issues Fixed ✅)
+
+1. **Audio Download** - Videos now download with audio merged
+   - ✅ Uses yt-dlp with FFmpeg merger
+   - ✅ Automatic audio+video stream selection
+   - ✅ Tested and verified
+
+2. **FFmpeg Detection** - Properly detects FFmpeg location
+   - ✅ Checks multiple standard paths
+   - ✅ Enriches subprocess PATH environment
+   - ✅ Works on Raspberry Pi and macOS
+
+3. **Reddit Access** - 403 errors fixed with proper headers
+   - ✅ Mozilla User-Agent headers
+   - ✅ CORS and Range request support
+   - ✅ Verified working with v.redd.it
+
+4. **Telegram Display** - Videos now show thumbnails with correct aspect ratio
+   - ✅ HandBrake encoding with `-a 1` (audio track)
+   - ✅ AAC codec with `-E aac` (proper audio)
+   - ✅ Web optimization with `--optimize` flag
+   - ✅ Locally tested and verified
 
 ## Installation
 
@@ -52,6 +78,18 @@
 
 ## Running the Bot
 
+### Auto-Start on Boot (Systemd - Recommended)
+
+The bot_manager.sh setup script automatically creates a systemd service. After setup, the bot will start on boot:
+
+```bash
+# Check service status
+systemctl status reddit-telegram-bot.service
+
+# View service logs
+sudo journalctl -u reddit-telegram-bot.service -f
+```
+
 ### Manual Start
 ```bash
 ./bot_manager.sh start
@@ -72,43 +110,29 @@
 ./bot_manager.sh logs
 ```
 
-## Auto-Start on Boot (Systemd)
+### Update Bot (pulls from git and restarts)
+```bash
+./bot_manager.sh update
+```
 
-1. **Create systemd service:**
-   ```bash
-   sudo nano /etc/systemd/system/reddit-telegram-bot.service
-   ```
+## What to Expect After Update
 
-2. **Add service configuration:**
-   ```ini
-   [Unit]
-   Description=Reddit Telegram Forwarder Bot
-   After=network.target
+After running `./bot_manager.sh update` on your Raspberry Pi:
 
-   [Service]
-   Type=simple
-   User=pi
-   WorkingDirectory=/home/pi/reddit-telegram-forwarder
-   Environment=PATH=/home/pi/reddit-telegram-forwarder/.venv/bin
-   ExecStart=/home/pi/reddit-telegram-forwarder/.venv/bin/python main.py
-   Restart=always
-   RestartSec=10
+- ✅ Videos download with audio merged in
+- ✅ Videos display on Telegram with visible thumbnails
+- ✅ Correct aspect ratio on Telegram mobile app
+- ✅ All video playback working properly
 
-   [Install]
-   WantedBy=multi-user.target
-   ```
+## Modifying Systemd Service Configuration
 
-3. **Enable and start service:**
-   ```bash
-   sudo systemctl daemon-reload
-   sudo systemctl enable reddit-telegram-bot.service
-   sudo systemctl start reddit-telegram-bot.service
-   ```
+If you need to modify the service configuration:
 
-4. **Check service status:**
-   ```bash
-   sudo systemctl status reddit-telegram-bot.service
-   ```
+```bash
+sudo nano /etc/systemd/system/reddit-telegram-bot.service
+sudo systemctl daemon-reload
+sudo systemctl restart reddit-telegram-bot.service
+```
 
 ## Troubleshooting
 
